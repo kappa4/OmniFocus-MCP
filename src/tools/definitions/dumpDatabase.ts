@@ -256,6 +256,19 @@ Status: #next #avail #block #due #over #compl #drop\n\n`;
     output += processProject(project, 0);
   }
   
+  // Process inbox tasks (tasks without a project)
+  const inboxTasks = database.tasks.filter((task: any) => 
+    !task.projectId && !task.parentId
+  );
+  
+  if (inboxTasks.length > 0) {
+    output += `\n## INBOX\n`;
+    
+    for (const task of inboxTasks) {
+      output += processTask(task, 0);
+    }
+  }
+  
   return output;
 }
 
