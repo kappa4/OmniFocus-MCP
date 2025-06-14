@@ -11,6 +11,7 @@ import * as removeItemTool from './tools/definitions/removeItem.js';
 import * as editItemTool from './tools/definitions/editItem.js';
 import * as batchAddItemsTool from './tools/definitions/batchAddItems.js';
 import * as batchRemoveItemsTool from './tools/definitions/batchRemoveItems.js';
+import * as getPerspectiveDataTool from './tools/definitions/getPerspectiveData.js';
 
 // Create an MCP server
 const server = new McpServer({
@@ -66,6 +67,13 @@ server.tool(
   "Remove multiple tasks or projects from OmniFocus in a single operation",
   batchRemoveItemsTool.schema.shape,
   batchRemoveItemsTool.handler
+);
+
+server.tool(
+  "get_perspective_data",
+  "Get data filtered by OmniFocus perspectives with advanced filtering options (duration, flags, tags, etc.)",
+  getPerspectiveDataTool.schema.shape,
+  getPerspectiveDataTool.handler
 );
 
 // Start the MCP server
