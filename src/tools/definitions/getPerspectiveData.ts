@@ -12,7 +12,10 @@ export const schema = z.object({
   flaggedOnly: z.boolean().optional().describe("フラグ付きのタスクのみ表示するかどうか（デフォルト: false）"),
   withTags: z.array(z.string()).optional().describe("指定したタグを持つタスクのみ表示"),
   withDueDate: z.boolean().optional().describe("期限が設定されているタスクのみ表示するかどうか"),
-  projectName: z.string().optional().describe("指定したプロジェクトのタスクのみ表示")
+  projectName: z.string().optional().describe("指定したプロジェクトのタスクのみ表示"),
+  // 最適化パラメータ
+  maxResults: z.number().optional().describe("最大結果数（デフォルト: 500）- パフォーマンス向上のため"),
+  prioritizeUrgent: z.boolean().optional().describe("緊急度の高いタスクを優先表示するかどうか（デフォルト: true）")
 });
 
 function formatDuration(minutes: number): string {
@@ -118,7 +121,10 @@ export async function handler(args: z.infer<typeof schema>, extra: RequestHandle
       flaggedOnly: args.flaggedOnly,
       withTags: args.withTags,
       withDueDate: args.withDueDate,
-      projectName: args.projectName
+      projectName: args.projectName,
+      // 最適化パラメータ
+      maxResults: args.maxResults || 500,
+      prioritizeUrgent: args.prioritizeUrgent !== false
     });
     
     if (result.success) {
@@ -187,6 +193,24 @@ export async function handler(args: z.infer<typeof schema>, extra: RequestHandle
           output += `- **合計時間**: ${formatDuration(totalMinutes)}\n`;
           output += `- **平均時間**: ${formatDuration(avgMinutes)}\n`;
           output += `- **時間設定済みタスク**: ${tasksWithEstimate.length}/${taskCount}\n`;
+        }
+      }
+      
+      // 最適化統計を追加
+      if (result.stats) {
+        output += `\n## ⚡ パフォーマンス最適化統計\n`;
+        output += `- **高優先度タスク**: ${result.stats.highPriority}件\n`;
+        output += `- **中優先度タスク**: ${result.stats.mediumPriority}件\n`;
+        output += `- **低優先度タスク**: ${result.stats.lowPriority}件\n`;
+        output += `- **フィルタ後総数**: ${result.stats.totalFiltered}件\n`;
+        output += `- **最大結果数制限**: ${result.stats.maxResults}件\n`;
+        
+        const efficiency = result.stats.maxResults > 0 ? 
+          Math.round((result.stats.totalFiltered / result.stats.maxResults) * 100) : 0;
+        output += `- **処理効率**: ${efficiency}% ${efficiency < 50 ? '🟢' : efficiency < 80 ? '🟡' : '🔴'}\n`;
+        
+        if (result.stats.totalFiltered >= result.stats.maxResults * 0.9) {
+          output += `\n💡 **ヒント**: 結果数が上限に近づいています。より具体的なフィルター条件を指定するか、\`maxResults\`を増やすことを検討してください。\n`;
         }
       }
       

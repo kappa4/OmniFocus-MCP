@@ -13,6 +13,8 @@ export interface GetDataByPerspectiveParams {
   withTags?: string[];
   withDueDate?: boolean;
   projectName?: string;
+  maxResults?: number;
+  prioritizeUrgent?: boolean;
 }
 
 export interface TaskInfo {
@@ -26,6 +28,7 @@ export interface TaskInfo {
   tags: string[];
   projectName?: string;
   note?: string;
+  urgencyScore?: number;
 }
 
 export interface ProjectInfo {
@@ -38,10 +41,68 @@ export interface ProjectInfo {
   taskCount?: number;
 }
 
+interface FilterSelectivity {
+  name: string;
+  exclusionRate: number;
+  order: number;
+}
+
+const FILTER_SELECTIVITY: FilterSelectivity[] = [
+  { name: 'projectName', exclusionRate: 0.90, order: 1 },
+  { name: 'flaggedOnly', exclusionRate: 0.85, order: 2 },
+  { name: 'minEstimatedMinutes', exclusionRate: 0.70, order: 3 },
+  { name: 'maxEstimatedMinutes', exclusionRate: 0.60, order: 4 },
+  { name: 'withDueDate', exclusionRate: 0.50, order: 5 },
+  { name: 'withTags', exclusionRate: 0.40, order: 6 },
+  { name: 'hideCompleted', exclusionRate: 0.30, order: 7 }
+];
+
+function calculateUrgencyScore(task: TaskInfo): number {
+  let score = 0;
+  const now = new Date();
+  
+  if (task.flagged) {
+    score += 100;
+  }
+  
+  if (task.dueDate) {
+    const dueDate = new Date(task.dueDate);
+    const daysUntilDue = Math.ceil((dueDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+    
+    if (daysUntilDue < 0) {
+      score += 200;
+    } else if (daysUntilDue === 0) {
+      score += 150;
+    } else if (daysUntilDue === 1) {
+      score += 100;
+    } else if (daysUntilDue <= 7) {
+      score += 50;
+    }
+  }
+  
+  if (task.estimatedMinutes) {
+    if (task.estimatedMinutes <= 15) {
+      score += 30;
+    } else if (task.estimatedMinutes <= 30) {
+      score += 20;
+    } else if (task.estimatedMinutes <= 60) {
+      score += 10;
+    }
+  }
+  
+  return score;
+}
+
+function getPriorityLevel(urgencyScore: number): 'high' | 'medium' | 'low' {
+  if (urgencyScore >= 150) return 'high';
+  if (urgencyScore >= 50) return 'medium';
+  return 'low';
+}
+
 /**
- * 特定のパースペクティブでフィルタリングされたデータを取得するAppleScriptを生成
+ * 最適化されたパースペクティブデータ取得AppleScript生成
  */
-function generateGetDataByPerspectiveScript(params: GetDataByPerspectiveParams): string {
+function generateOptimizedGetDataByPerspectiveScript(params: GetDataByPerspectiveParams): string {
   const { 
     perspectiveName, 
     hideCompleted = true, 
@@ -51,7 +112,9 @@ function generateGetDataByPerspectiveScript(params: GetDataByPerspectiveParams):
     flaggedOnly = false,
     withTags = [],
     withDueDate,
-    projectName
+    projectName,
+    maxResults = 500,
+    prioritizeUrgent = true
   } = params;
   
   const escapedPerspectiveName = perspectiveName.replace(/['"\\]/g, '\\$&');
@@ -61,12 +124,9 @@ function generateGetDataByPerspectiveScript(params: GetDataByPerspectiveParams):
   try
     tell application "OmniFocus"
       tell front document
-        -- パースペクティブを設定
         set targetWindow to front window
         
-        -- 組み込みパースペクティブの場合
         if "${escapedPerspectiveName}" is in {"Inbox", "Projects", "Tags", "Forecast", "Flagged", "Review"} then
-          -- 組み込みパースペクティブを表示
           tell targetWindow
             if "${escapedPerspectiveName}" is "Inbox" then
               set perspective to inbox perspective
@@ -83,7 +143,6 @@ function generateGetDataByPerspectiveScript(params: GetDataByPerspectiveParams):
             end if
           end tell
         else
-          -- カスタムパースペクティブの場合
           set customPerspective to first perspective whose name is "${escapedPerspectiveName}"
           tell targetWindow
             set perspective to customPerspective
@@ -92,30 +151,32 @@ function generateGetDataByPerspectiveScript(params: GetDataByPerspectiveParams):
         
         delay 0.5
         
-        -- 現在のビューからタスクとプロジェクトを取得
-        set visibleTasks to {}
+        set highPriorityTasks to {}
+        set mediumPriorityTasks to {}
+        set lowPriorityTasks to {}
         set visibleProjects to {}
         
-        -- フラット化されたタスクから可視のものを取得
+        set maxHighPriority to ${Math.floor(maxResults * 0.4)}
+        set maxMediumPriority to ${Math.floor(maxResults * 0.4)}
+        set maxLowPriority to ${Math.floor(maxResults * 0.2)}
+        
+        set highCount to 0
+        set mediumCount to 0
+        set lowCount to 0
+        
         set allTasks to flattened tasks
         repeat with aTask in allTasks
-          set taskCompleted to completed of aTask
-          set taskDropped to (dropped of aTask)
-          set taskFlagged to flagged of aTask
-          
-          -- 基本的なフィルタリング
           set shouldInclude to true
-          if ${hideCompleted} and (taskCompleted or taskDropped) then
-            set shouldInclude to false
+          
+          -- 結果数制限チェック（早期終了）
+          if (highCount ≥ maxHighPriority) and (mediumCount ≥ maxMediumPriority) and (lowCount ≥ maxLowPriority) then
+            exit repeat
           end if
           
-          -- フラグ付きのみのフィルタ
-          if ${flaggedOnly} and not taskFlagged then
-            set shouldInclude to false
-          end if
+          -- 高選択性フィルターを優先適用（cardinality-based early termination）
           
-          -- プロジェクト名でのフィルタ
-          if "${escapedProjectName}" is not "" then
+          -- プロジェクト名フィルタ（選択性: 90%）
+          if shouldInclude and "${escapedProjectName}" is not "" then
             try
               set taskProject to containing project of aTask
               if taskProject is not missing value then
@@ -131,30 +192,54 @@ function generateGetDataByPerspectiveScript(params: GetDataByPerspectiveParams):
             end try
           end if
           
-          -- 推定時間でのフィルタ
-          if shouldInclude then
+          if not shouldInclude then next repeat
+          
+          -- フラグ付きフィルタ（選択性: 85%）
+          if shouldInclude and ${flaggedOnly} then
+            set taskFlagged to flagged of aTask
+            if not taskFlagged then
+              set shouldInclude to false
+            end if
+          end if
+          
+          if not shouldInclude then next repeat
+          
+          -- 最小時間フィルタ（選択性: 70%）
+          ${minEstimatedMinutes ? `if shouldInclude then
             try
               set taskEstimatedMinutes to estimated minutes of aTask
               if taskEstimatedMinutes is not missing value then
-                ${minEstimatedMinutes ? `
                 if taskEstimatedMinutes < ${minEstimatedMinutes} then
                   set shouldInclude to false
-                end if` : ''}
-                ${maxEstimatedMinutes ? `
-                if taskEstimatedMinutes > ${maxEstimatedMinutes} then
-                  set shouldInclude to false
-                end if` : ''}
+                end if
               else
-                ${minEstimatedMinutes ? 'set shouldInclude to false' : ''}
+                set shouldInclude to false
               end if
             on error
-              ${minEstimatedMinutes ? 'set shouldInclude to false' : ''}
+              set shouldInclude to false
             end try
           end if
           
-          -- 期限の有無でのフィルタ
-          ${withDueDate !== undefined ? `
-          if shouldInclude then
+          if not shouldInclude then next repeat` : ''}
+          
+          -- 最大時間フィルタ（選択性: 60%）
+          ${maxEstimatedMinutes ? `if shouldInclude then
+            try
+              set taskEstimatedMinutes to estimated minutes of aTask
+              if taskEstimatedMinutes is not missing value then
+                if taskEstimatedMinutes > ${maxEstimatedMinutes} then
+                  set shouldInclude to false
+                end if
+              end if
+            on error
+              -- 推定時間が取得できない場合は含める
+            end try
+          end if
+          
+          if not shouldInclude then next repeat` : ''}
+          
+          -- 期限有無フィルタ（選択性: 50%）
+          ${withDueDate !== undefined ? `if shouldInclude then
             try
               set taskDueDate to due date of aTask
               if ${withDueDate} then
@@ -169,175 +254,291 @@ function generateGetDataByPerspectiveScript(params: GetDataByPerspectiveParams):
             on error
               ${withDueDate ? 'set shouldInclude to false' : ''}
             end try
-          end if` : ''}
+          end if
           
+          if not shouldInclude then next repeat` : ''}
+          
+          -- 完了タスクフィルタ（選択性: 30%）
+          if shouldInclude and ${hideCompleted} then
+            set taskCompleted to completed of aTask
+            set taskDropped to (dropped of aTask)
+            if taskCompleted or taskDropped then
+              set shouldInclude to false
+            end if
+          end if
+          
+          if not shouldInclude then next repeat
+          
+          -- ここまで来たタスクは条件をすべて満たしている
           if shouldInclude then
-            -- タスク情報を取得
-            set taskName to name of aTask
-            set taskId to id of aTask as string
-            set taskNote to note of aTask
+            -- 緊急度スコアを計算
+            set urgencyScore to 0
+            set taskFlagged to flagged of aTask
             
-            -- 推定時間を取得
-            set taskEstMinStr to "null"
-            try
-              set taskEstimatedMinutes to estimated minutes of aTask
-              if taskEstimatedMinutes is not missing value then
-                set taskEstMinStr to (taskEstimatedMinutes as string)
-              end if
-            end try
+            -- フラグ付きタスク
+            if taskFlagged then
+              set urgencyScore to urgencyScore + 100
+            end if
             
-            -- 期限を取得
-            set taskDueDateStr to "null"
+            -- 期限による優先度
             try
               set taskDueDate to due date of aTask
               if taskDueDate is not missing value then
-                set taskDueDateStr to "\\"" & (taskDueDate as string) & "\\""
+                set currentDate to current date
+                set daysDiff to (taskDueDate - currentDate) / days
+                if daysDiff < 0 then
+                  set urgencyScore to urgencyScore + 200 -- 期限超過
+                else if daysDiff < 1 then
+                  set urgencyScore to urgencyScore + 150 -- 今日期限
+                else if daysDiff < 2 then
+                  set urgencyScore to urgencyScore + 100 -- 明日期限
+                else if daysDiff < 8 then
+                  set urgencyScore to urgencyScore + 50 -- 1週間以内
+                end if
               end if
+            on error
+              -- 期限取得エラーは無視
             end try
             
-            -- 延期日を取得
-            set taskDeferDateStr to "null"
+            -- 短時間タスクの優先度
             try
-              set taskDeferDate to defer date of aTask
-              if taskDeferDate is not missing value then
-                set taskDeferDateStr to "\\"" & (taskDeferDate as string) & "\\""
+              set taskEstimatedMinutes to estimated minutes of aTask
+              if taskEstimatedMinutes is not missing value then
+                if taskEstimatedMinutes ≤ 15 then
+                  set urgencyScore to urgencyScore + 30
+                else if taskEstimatedMinutes ≤ 30 then
+                  set urgencyScore to urgencyScore + 20
+                else if taskEstimatedMinutes ≤ 60 then
+                  set urgencyScore to urgencyScore + 10
+                end if
               end if
+            on error
+              -- 推定時間取得エラーは無視
             end try
             
-            -- プロジェクト名を取得
-            set taskProjectNameStr to "null"
-            try
-              set taskProject to containing project of aTask
-              if taskProject is not missing value then
-                set taskProjectNameStr to "\\"" & (name of taskProject) & "\\""
-              end if
-            end try
+            -- 優先度レベル決定
+            set priorityLevel to "low"
+            if urgencyScore ≥ 150 then
+              set priorityLevel to "high"
+            else if urgencyScore ≥ 50 then
+              set priorityLevel to "medium"
+            end if
             
-            -- タグを取得
-            set taskTagsStr to "[]"
-            try
-              set taskTags to tags of aTask
-              if (count of taskTags) > 0 then
-                set tagList to {}
+            -- 優先度別に結果数制限を適用
+            set shouldAddTask to false
+            if priorityLevel is "high" and highCount < maxHighPriority then
+              set shouldAddTask to true
+              set highCount to highCount + 1
+            else if priorityLevel is "medium" and mediumCount < maxMediumPriority then
+              set shouldAddTask to true
+              set mediumCount to mediumCount + 1
+            else if priorityLevel is "low" and lowCount < maxLowPriority then
+              set shouldAddTask to true
+              set lowCount to lowCount + 1
+            end if
+            
+            if shouldAddTask then
+              -- タスク情報を取得
+              set taskName to name of aTask
+              set taskId to id of aTask as string
+              set taskNote to note of aTask
+              set taskCompleted to completed of aTask
+              
+              -- 推定時間を取得
+              set taskEstMinStr to "null"
+              try
+                set taskEstimatedMinutes to estimated minutes of aTask
+                if taskEstimatedMinutes is not missing value then
+                  set taskEstMinStr to (taskEstimatedMinutes as string)
+                end if
+              end try
+              
+              -- 期限を取得
+              set taskDueDateStr to "null"
+              try
+                set taskDueDate to due date of aTask
+                if taskDueDate is not missing value then
+                  set taskDueDateStr to "\\"" & (taskDueDate as string) & "\\""
+                end if
+              end try
+              
+              -- 延期日を取得
+              set taskDeferDateStr to "null"
+              try
+                set taskDeferDate to defer date of aTask
+                if taskDeferDate is not missing value then
+                  set taskDeferDateStr to "\\"" & (taskDeferDate as string) & "\\""
+                end if
+              end try
+              
+              -- タグを取得
+              set taskTagsStr to ""
+              try
+                set taskTags to tags of aTask
                 repeat with aTag in taskTags
-                  set end of tagList to "\\"" & (name of aTag) & "\\""
+                  set tagName to name of aTag
+                  if taskTagsStr is "" then
+                    set taskTagsStr to tagName
+                  else
+                    set taskTagsStr to taskTagsStr & "," & tagName
+                  end if
                 end repeat
-                set AppleScript's text item delimiters to ","
-                set taskTagsStr to "[" & (tagList as string) & "]"
-                set AppleScript's text item delimiters to ""
+              end try
+              
+              -- プロジェクト名を取得
+              set taskProjectStr to "null"
+              try
+                set taskProject to containing project of aTask
+                if taskProject is not missing value then
+                  set taskProjectName to name of taskProject
+                  set taskProjectStr to "\\"" & taskProjectName & "\\""
+                end if
+              end try
+              
+              -- タスクJSONを構築
+              set taskInfo to "{\\"id\\":\\"" & taskId & "\\",\\"name\\":\\"" & taskName & "\\",\\"completed\\":" & taskCompleted & ",\\"flagged\\":" & taskFlagged & ",\\"estimatedMinutes\\":" & taskEstMinStr & ",\\"dueDate\\":" & taskDueDateStr & ",\\"deferDate\\":" & taskDeferDateStr & ",\\"tags\\":\\"" & taskTagsStr & "\\",\\"projectName\\":" & taskProjectStr & ",\\"note\\":\\"" & taskNote & "\\",\\"urgencyScore\\":" & urgencyScore & ",\\"priorityLevel\\":\\"" & priorityLevel & "\\"}"
+              
+              -- 優先度レベル別にタスクを追加
+              if priorityLevel is "high" then
+                set highPriorityTasks to highPriorityTasks & taskInfo
+              else if priorityLevel is "medium" then
+                set mediumPriorityTasks to mediumPriorityTasks & taskInfo
+              else
+                set lowPriorityTasks to lowPriorityTasks & taskInfo
               end if
-            end try
-            
-            set taskInfo to "{\\"id\\":\\"" & taskId & "\\",\\"name\\":\\"" & taskName & "\\",\\"completed\\":" & taskCompleted & ",\\"flagged\\":" & taskFlagged & ",\\"estimatedMinutes\\":" & taskEstMinStr & ",\\"dueDate\\":" & taskDueDateStr & ",\\"deferDate\\":" & taskDeferDateStr & ",\\"projectName\\":" & taskProjectNameStr & ",\\"tags\\":" & taskTagsStr & ",\\"note\\":\\"" & taskNote & "\\"}"
-            set end of visibleTasks to taskInfo
+            end if
           end if
         end repeat
         
-        -- フラット化されたプロジェクトから可視のものを取得
+        -- プロジェクト情報を取得
         set allProjects to flattened projects
         repeat with aProject in allProjects
-          set projectCompleted to (status of aProject is done)
-          set projectDropped to (status of aProject is dropped)
+          set projectName to name of aProject
+          set projectId to id of aProject as string
+          set projectStatus to status of aProject as string
+          set projectFlagged to flagged of aProject
           
-          -- 完了/ドロップしたプロジェクトを隠すかどうか
-          set shouldInclude to true
-          if ${hideCompleted} and (projectCompleted or projectDropped) then
-            set shouldInclude to false
-          end if
+          set projectEstMinStr to "null"
+          try
+            set projectEstimatedMinutes to estimated minutes of aProject
+            if projectEstimatedMinutes is not missing value then
+              set projectEstMinStr to (projectEstimatedMinutes as string)
+            end if
+          end try
           
-          if shouldInclude then
-            set projectName to name of aProject
-            set projectId to id of aProject as string
-            set projectStatus to status of aProject as string
-            set projectFlagged to flagged of aProject
-            
-            -- プロジェクトの推定時間を取得
-            set projectEstMinStr to "null"
-            try
-              set projectEstimatedMinutes to estimated minutes of aProject
-              if projectEstimatedMinutes is not missing value then
-                set projectEstMinStr to (projectEstimatedMinutes as string)
-              end if
-            end try
-            
-            -- プロジェクトの期限を取得
-            set projectDueDateStr to "null"
-            try
-              set projectDueDate to due date of aProject
-              if projectDueDate is not missing value then
-                set projectDueDateStr to "\\"" & (projectDueDate as string) & "\\""
-              end if
-            end try
-            
-            -- プロジェクト内のタスク数を取得
-            set projectTaskCount to count of tasks of aProject
-            
-            set projectInfo to "{\\"id\\":\\"" & projectId & "\\",\\"name\\":\\"" & projectName & "\\",\\"status\\":\\"" & projectStatus & "\\",\\"flagged\\":" & projectFlagged & ",\\"estimatedMinutes\\":" & projectEstMinStr & ",\\"dueDate\\":" & projectDueDateStr & ",\\"taskCount\\":" & projectTaskCount & "}"
-            set end of visibleProjects to projectInfo
-          end if
+          set projectDueDateStr to "null"
+          try
+            set projectDueDate to due date of aProject
+            if projectDueDate is not missing value then
+              set projectDueDateStr to "\\"" & (projectDueDate as string) & "\\""
+            end if
+          end try
+          
+          set projectTaskCount to 0
+          try
+            set projectTasks to flattened tasks of aProject
+            set projectTaskCount to count of projectTasks
+          end try
+          
+          set projectInfo to "{\\"id\\":\\"" & projectId & "\\",\\"name\\":\\"" & projectName & "\\",\\"status\\":\\"" & projectStatus & "\\",\\"flagged\\":" & projectFlagged & ",\\"estimatedMinutes\\":" & projectEstMinStr & ",\\"dueDate\\":" & projectDueDateStr & ",\\"taskCount\\":" & projectTaskCount & "}"
+          set visibleProjects to visibleProjects & projectInfo
         end repeat
         
-        -- 結果をJSON形式で構築
-        set AppleScript's text item delimiters to ","
-        set tasksJson to "[" & (visibleTasks as string) & "]"
-        set projectsJson to "[" & (visibleProjects as string) & "]"
-        set AppleScript's text item delimiters to ""
+        -- ${prioritizeUrgent ? '優先度順に' : '元の順序で'}結果を結合
+        set allTasks to {}
+        ${prioritizeUrgent ? 
+          'set allTasks to highPriorityTasks & mediumPriorityTasks & lowPriorityTasks' :
+          'set allTasks to lowPriorityTasks & mediumPriorityTasks & highPriorityTasks'
+        }
         
-        set resultJson to "{\\"success\\":true,\\"perspective\\":\\"${escapedPerspectiveName}\\",\\"tasks\\":" & tasksJson & ",\\"projects\\":" & projectsJson & "}"
+        -- JSON出力
+        set output to "{\\"success\\":true,\\"perspective\\":\\"${escapedPerspectiveName}\\",\\"tasks\\":["
+        repeat with i from 1 to count of allTasks
+          set output to output & item i of allTasks
+          if i < count of allTasks then
+            set output to output & ","
+          end if
+        end repeat
+        set output to output & "],\\"projects\\":["
+        repeat with i from 1 to count of visibleProjects
+          set output to output & item i of visibleProjects
+          if i < count of visibleProjects then
+            set output to output & ","
+          end if
+        end repeat
+        set output to output & "],\\"stats\\":{\\"highPriority\\":" & highCount & ",\\"mediumPriority\\":" & mediumCount & ",\\"lowPriority\\":" & lowCount & ",\\"totalFiltered\\":" & (highCount + mediumCount + lowCount) & ",\\"maxResults\\":" & ${maxResults} & "}}"
         
-        return resultJson
+        return output
       end tell
     end tell
-  on error errorMessage
-    return "{\\"success\\":false,\\"error\\":\\"" & errorMessage & "\\"}"
+  on error errMsg
+    return "{\\"success\\":false,\\"error\\":\\"" & errMsg & "\\"}"
   end try
   `;
 }
 
-/**
- * 特定のパースペクティブでフィルタリングされたデータを取得
- */
 export async function getDataByPerspective(params: GetDataByPerspectiveParams): Promise<{
   success: boolean,
   perspective?: string,
   tasks?: TaskInfo[],
   projects?: ProjectInfo[],
+  stats?: {
+    highPriority: number,
+    mediumPriority: number,
+    lowPriority: number,
+    totalFiltered: number,
+    maxResults: number
+  },
   error?: string
 }> {
   try {
-    const script = generateGetDataByPerspectiveScript(params);
+    const script = generateOptimizedGetDataByPerspectiveScript(params);
+    const { stdout } = await execAsync(`osascript -e '${script.replace(/'/g, "'\\''")}'`);
     
-    console.error(`Executing AppleScript for perspective: ${params.perspectiveName}`);
-    if (params.minEstimatedMinutes) {
-      console.error(`Filtering tasks with >= ${params.minEstimatedMinutes} minutes`);
-    }
-    if (params.maxEstimatedMinutes) {
-      console.error(`Filtering tasks with <= ${params.maxEstimatedMinutes} minutes`);
-    }
+    const result = JSON.parse(stdout.trim());
     
-    const { stdout, stderr } = await execAsync(`osascript -e '${script}'`);
-    
-    if (stderr) {
-      console.error("AppleScript stderr:", stderr);
-    }
-    
-    console.error("AppleScript stdout:", stdout);
-    
-    try {
-      const result = JSON.parse(stdout);
-      return result;
-    } catch (parseError) {
-      console.error("Error parsing AppleScript result:", parseError);
+    if (result.success) {
+      const tasks: TaskInfo[] = result.tasks?.map((task: any) => ({
+        id: task.id,
+        name: task.name,
+        completed: task.completed,
+        flagged: task.flagged,
+        estimatedMinutes: task.estimatedMinutes,
+        dueDate: task.dueDate,
+        deferDate: task.deferDate,
+        tags: task.tags ? task.tags.split(',').filter((tag: string) => tag.trim() !== '') : [],
+        projectName: task.projectName,
+        note: task.note,
+        urgencyScore: task.urgencyScore
+      })) || [];
+      
+      const projects: ProjectInfo[] = result.projects?.map((project: any) => ({
+        id: project.id,
+        name: project.name,
+        status: project.status,
+        flagged: project.flagged,
+        estimatedMinutes: project.estimatedMinutes,
+        dueDate: project.dueDate,
+        taskCount: project.taskCount
+      })) || [];
+      
+      return {
+        success: true,
+        perspective: result.perspective,
+        tasks,
+        projects,
+        stats: result.stats
+      };
+    } else {
       return {
         success: false,
-        error: `Failed to parse result: ${stdout}`
+        error: result.error
       };
     }
-  } catch (error: any) {
-    console.error("Error in getDataByPerspective execution:", error);
+  } catch (error) {
     return {
       success: false,
-      error: error?.message || "Unknown error in getDataByPerspective"
+      error: error instanceof Error ? error.message : String(error)
     };
   }
 } 
